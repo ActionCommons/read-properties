@@ -1,3 +1,7 @@
+/**
+ * © 2026-present Action Commons (https://github.com/ActionCommons)
+ */
+
 import type * as core from '@actions/core'
 import { jest } from '@jest/globals'
 

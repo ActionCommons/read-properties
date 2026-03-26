@@ -1,23 +1,51 @@
-name: The name of your action here
-description: Provide a description here
-author: Your name or organization here
-
-# Add your action's branding here. This will appear on the GitHub Marketplace.
+#
+# © 2026-present Action Commons (https://github.com/ActionCommons)
+#
+name: Read Properties Action
+description: >
+  Reads one or more .properties files and exposes every key-value pair as a step
+  output in the form <filename>.<key>.
+author: Action Commons (https://github.com/ActionCommons)
+# https://feathericons.com — pick an icon that fits your action.
 branding:
-  icon: heart
-  color: red
+  icon: file-text
+  color: blue
 
-# Define your inputs here.
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
 inputs:
-  milliseconds:
-    description: Your input description here
+  files:
+    description: >
+      A newline-separated list of one or more .properties file paths to read.
     required: true
-    default: '1000'
 
-# Define your outputs here.
-outputs:
-  time:
-    description: Your output description here
+  properties:
+    description: >
+      A newline-separated list of property keys to read from each file. When
+      omitted, all properties are read.
+    required: false
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+#
+# Outputs are set dynamically at runtime and cannot be enumerated statically.
+#
+# The output key format is:  <stem>.<property-key>
+#
+#   stem          = filename without extension, e.g. "config" for config.properties
+#   property-key  = the key as it appears in the .properties file
+#
+# When two files share the same stem the second receives a "1" suffix,
+# the third a "2" suffix, and so on:
+#
+#   steps.read.outputs['config.host']   ← first  config.properties
+#   steps.read.outputs['config1.host']  ← second config.properties
+#
+# Access via bracket notation in expressions when the key contains a dot:
+#   ${{ steps.read.outputs['config.host'] }}
+#
 
 runs:
   using: node24

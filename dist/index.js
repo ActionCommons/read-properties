@@ -2,8 +2,8 @@ import * as os from 'os';
 import os__default from 'os';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
-import { promises } from 'fs';
-import 'path';
+import { promises, readFileSync } from 'fs';
+import path from 'path';
 import http from 'http';
 import https from 'https';
 import 'net';
@@ -932,6 +932,24 @@ function requireErrors () {
 	  [kSecureProxyConnectionError] = true
 	}
 
+	const kMessageSizeExceededError = Symbol.for('undici.error.UND_ERR_WS_MESSAGE_SIZE_EXCEEDED');
+	class MessageSizeExceededError extends UndiciError {
+	  constructor (message) {
+	    super(message);
+	    this.name = 'MessageSizeExceededError';
+	    this.message = message || 'Max decompressed message size exceeded';
+	    this.code = 'UND_ERR_WS_MESSAGE_SIZE_EXCEEDED';
+	  }
+
+	  static [Symbol.hasInstance] (instance) {
+	    return instance && instance[kMessageSizeExceededError] === true
+	  }
+
+	  get [kMessageSizeExceededError] () {
+	    return true
+	  }
+	}
+
 	errors = {
 	  AbortError,
 	  HTTPParserError,
@@ -955,7 +973,8 @@ function requireErrors () {
 	  ResponseExceededMaxSizeError,
 	  RequestRetryError,
 	  ResponseError,
-	  SecureProxyConnectionError
+	  SecureProxyConnectionError,
+	  MessageSizeExceededError
 	};
 	return errors;
 }
@@ -2256,6 +2275,10 @@ function requireRequest$1 () {
 	      throw new InvalidArgumentError('upgrade must be a string')
 	    }
 
+	    if (upgrade && !isValidHeaderValue(upgrade)) {
+	      throw new InvalidArgumentError('invalid upgrade header')
+	    }
+
 	    if (headersTimeout != null && (!Number.isFinite(headersTimeout) || headersTimeout < 0)) {
 	      throw new InvalidArgumentError('invalid headersTimeout')
 	    }
@@ -2550,13 +2573,19 @@ function requireRequest$1 () {
 	    val = `${val}`;
 	  }
 
-	  if (request.host === null && headerName === 'host') {
+	  if (headerName === 'host') {
+	    if (request.host !== null) {
+	      throw new InvalidArgumentError('duplicate host header')
+	    }
 	    if (typeof val !== 'string') {
 	      throw new InvalidArgumentError('invalid host header')
 	    }
 	    // Consumed by Client
 	    request.host = val;
-	  } else if (request.contentLength === null && headerName === 'content-length') {
+	  } else if (headerName === 'content-length') {
+	    if (request.contentLength !== null) {
+	      throw new InvalidArgumentError('duplicate content-length header')
+	    }
 	    request.contentLength = parseInt(val, 10);
 	    if (!Number.isFinite(request.contentLength)) {
 	      throw new InvalidArgumentError('invalid content-length header')
@@ -24913,6 +24942,12 @@ function requireUtil$1 () {
 	 * @param {string} value
 	 */
 	function isValidClientWindowBits (value) {
+	  // Must have at least one character
+	  if (value.length === 0) {
+	    return false
+	  }
+
+	  // Check all characters are ASCII digits
 	  for (let i = 0; i < value.length; i++) {
 	    const byte = value.charCodeAt(i);
 
@@ -24921,7 +24956,9 @@ function requireUtil$1 () {
 	    }
 	  }
 
-	  return true
+	  // Check numeric range: zlib requires windowBits in range 8-15
+	  const num = Number.parseInt(value, 10);
+	  return num >= 8 && num <= 15
 	}
 
 	// https://nodejs.org/api/intl.html#detecting-internationalization-support
@@ -25451,10 +25488,14 @@ function requirePermessageDeflate () {
 
 	const { createInflateRaw, Z_DEFAULT_WINDOWBITS } = require$$1$2;
 	const { isValidClientWindowBits } = requireUtil$1();
+	const { MessageSizeExceededError } = requireErrors();
 
 	const tail = Buffer.from([0x00, 0x00, 0xff, 0xff]);
 	const kBuffer = Symbol('kBuffer');
 	const kLength = Symbol('kLength');
+
+	// Default maximum decompressed message size: 4 MB
+	const kDefaultMaxDecompressedSize = 4 * 1024 * 1024;
 
 	class PerMessageDeflate {
 	  /** @type {import('node:zlib').InflateRaw} */
@@ -25462,9 +25503,23 @@ function requirePermessageDeflate () {
 
 	  #options = {}
 
-	  constructor (extensions) {
+	  /** @type {number} */
+	  #maxDecompressedSize
+
+	  /** @type {boolean} */
+	  #aborted = false
+
+	  /** @type {Function|null} */
+	  #currentCallback = null
+
+	  /**
+	   * @param {Map<string, string>} extensions
+	   * @param {{ maxDecompressedMessageSize?: number }} [options]
+	   */
+	  constructor (extensions, options = {}) {
 	    this.#options.serverNoContextTakeover = extensions.has('server_no_context_takeover');
 	    this.#options.serverMaxWindowBits = extensions.get('server_max_window_bits');
+	    this.#maxDecompressedSize = options.maxDecompressedMessageSize ?? kDefaultMaxDecompressedSize;
 	  }
 
 	  decompress (chunk, fin, callback) {
@@ -25472,6 +25527,11 @@ function requirePermessageDeflate () {
 	    // 1.  Append 4 octets of 0x00 0x00 0xff 0xff to the tail end of the
 	    //     payload of the message.
 	    // 2.  Decompress the resulting data using DEFLATE.
+
+	    if (this.#aborted) {
+	      callback(new MessageSizeExceededError());
+	      return
+	    }
 
 	    if (!this.#inflate) {
 	      let windowBits = Z_DEFAULT_WINDOWBITS;
@@ -25485,13 +25545,37 @@ function requirePermessageDeflate () {
 	        windowBits = Number.parseInt(this.#options.serverMaxWindowBits);
 	      }
 
-	      this.#inflate = createInflateRaw({ windowBits });
+	      try {
+	        this.#inflate = createInflateRaw({ windowBits });
+	      } catch (err) {
+	        callback(err);
+	        return
+	      }
 	      this.#inflate[kBuffer] = [];
 	      this.#inflate[kLength] = 0;
 
 	      this.#inflate.on('data', (data) => {
-	        this.#inflate[kBuffer].push(data);
+	        if (this.#aborted) {
+	          return
+	        }
+
 	        this.#inflate[kLength] += data.length;
+
+	        if (this.#inflate[kLength] > this.#maxDecompressedSize) {
+	          this.#aborted = true;
+	          this.#inflate.removeAllListeners();
+	          this.#inflate.destroy();
+	          this.#inflate = null;
+
+	          if (this.#currentCallback) {
+	            const cb = this.#currentCallback;
+	            this.#currentCallback = null;
+	            cb(new MessageSizeExceededError());
+	          }
+	          return
+	        }
+
+	        this.#inflate[kBuffer].push(data);
 	      });
 
 	      this.#inflate.on('error', (err) => {
@@ -25500,16 +25584,22 @@ function requirePermessageDeflate () {
 	      });
 	    }
 
+	    this.#currentCallback = callback;
 	    this.#inflate.write(chunk);
 	    if (fin) {
 	      this.#inflate.write(tail);
 	    }
 
 	    this.#inflate.flush(() => {
+	      if (this.#aborted || !this.#inflate) {
+	        return
+	      }
+
 	      const full = Buffer.concat(this.#inflate[kBuffer], this.#inflate[kLength]);
 
 	      this.#inflate[kBuffer].length = 0;
 	      this.#inflate[kLength] = 0;
+	      this.#currentCallback = null;
 
 	      callback(null, full);
 	    });
@@ -25564,14 +25654,23 @@ function requireReceiver () {
 	  /** @type {Map<string, PerMessageDeflate>} */
 	  #extensions
 
-	  constructor (ws, extensions) {
+	  /** @type {{ maxDecompressedMessageSize?: number }} */
+	  #options
+
+	  /**
+	   * @param {import('./websocket').WebSocket} ws
+	   * @param {Map<string, string>|null} extensions
+	   * @param {{ maxDecompressedMessageSize?: number }} [options]
+	   */
+	  constructor (ws, extensions, options = {}) {
 	    super();
 
 	    this.ws = ws;
 	    this.#extensions = extensions == null ? new Map() : extensions;
+	    this.#options = options;
 
 	    if (this.#extensions.has('permessage-deflate')) {
-	      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions));
+	      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions, options));
 	    }
 	  }
 
@@ -25706,6 +25805,7 @@ function requireReceiver () {
 
 	        const buffer = this.consume(8);
 	        const upper = buffer.readUInt32BE(0);
+	        const lower = buffer.readUInt32BE(4);
 
 	        // 2^31 is the maximum bytes an arraybuffer can contain
 	        // on 32-bit systems. Although, on 64-bit systems, this is
@@ -25713,14 +25813,12 @@ function requireReceiver () {
 	        // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Errors/Invalid_array_length
 	        // https://source.chromium.org/chromium/chromium/src/+/main:v8/src/common/globals.h;drc=1946212ac0100668f14eb9e2843bdd846e510a1e;bpv=1;bpt=1;l=1275
 	        // https://source.chromium.org/chromium/chromium/src/+/main:v8/src/objects/js-array-buffer.h;l=34;drc=1946212ac0100668f14eb9e2843bdd846e510a1e
-	        if (upper > 2 ** 31 - 1) {
+	        if (upper !== 0 || lower > 2 ** 31 - 1) {
 	          failWebsocketConnection(this.ws, 'Received payload length > 2^31 bytes.');
 	          return
 	        }
 
-	        const lower = buffer.readUInt32BE(4);
-
-	        this.#info.payloadLength = (upper << 8) + lower;
+	        this.#info.payloadLength = lower;
 	        this.#state = parserStates.READ_DATA;
 	      } else if (this.#state === parserStates.READ_DATA) {
 	        if (this.#byteOffset < this.#info.payloadLength) {
@@ -25750,7 +25848,7 @@ function requireReceiver () {
 	          } else {
 	            this.#extensions.get('permessage-deflate').decompress(body, this.#info.fin, (error, data) => {
 	              if (error) {
-	                closeWebSocketConnection(this.ws, 1007, error.message, error.message.length);
+	                failWebsocketConnection(this.ws, error.message);
 	                return
 	              }
 
@@ -26115,6 +26213,9 @@ function requireWebsocket () {
 	  /** @type {SendQueue} */
 	  #sendQueue
 
+	  /** @type {{ maxDecompressedMessageSize?: number }} */
+	  #options
+
 	  /**
 	   * @param {string} url
 	   * @param {string|string[]} protocols
@@ -26187,6 +26288,11 @@ function requireWebsocket () {
 
 	    // 10. Set this's url to urlRecord.
 	    this[kWebSocketURL] = new URL(urlRecord.href);
+
+	    // Store options for later use (e.g., maxDecompressedMessageSize)
+	    this.#options = {
+	      maxDecompressedMessageSize: options.maxDecompressedMessageSize
+	    };
 
 	    // 11. Let client be this's relevant settings object.
 	    const client = environmentSettingsObject.settingsObject;
@@ -26502,11 +26608,11 @@ function requireWebsocket () {
 	   * @see https://websockets.spec.whatwg.org/#feedback-from-the-protocol
 	   */
 	  #onConnectionEstablished (response, parsedExtensions) {
-	    // processResponse is called when the "response’s header list has been received and initialized."
+	    // processResponse is called when the "response's header list has been received and initialized."
 	    // once this happens, the connection is open
 	    this[kResponse] = response;
 
-	    const parser = new ByteParser(this, parsedExtensions);
+	    const parser = new ByteParser(this, parsedExtensions, this.#options);
 	    parser.on('drain', onParserDrain);
 	    parser.on('error', onParserError.bind(this));
 
@@ -26609,6 +26715,19 @@ function requireWebsocket () {
 	  {
 	    key: 'headers',
 	    converter: webidl.nullableConverter(webidl.converters.HeadersInit)
+	  },
+	  {
+	    key: 'maxDecompressedMessageSize',
+	    converter: webidl.nullableConverter((V) => {
+	      V = webidl.converters['unsigned long long'](V);
+	      if (V <= 0) {
+	        throw webidl.errors.exception({
+	          header: 'WebSocket constructor',
+	          message: 'maxDecompressedMessageSize must be greater than 0'
+	        })
+	      }
+	      return V
+	    })
 	  }
 	]);
 
@@ -28006,46 +28125,225 @@ function debug(message) {
 function error(message, properties = {}) {
     issueCommand('error', toCommandProperties(properties), message instanceof Error ? message.toString() : message);
 }
-
 /**
- * Waits for a number of milliseconds.
- *
- * @param milliseconds The number of milliseconds to wait.
- * @returns Resolves with 'done!' after the wait is over.
+ * Writes info to log with console.log.
+ * @param message info message
  */
-async function wait(milliseconds) {
-    return new Promise((resolve) => {
-        if (isNaN(milliseconds))
-            throw new Error('milliseconds is not a number');
-        setTimeout(() => resolve('done!'), milliseconds);
-    });
+function info(message) {
+    process.stdout.write(message + os.EOL);
 }
 
 /**
- * The main function for the action.
+ * © 2026-present Action Commons (https://github.com/ActionCommons)
+ */
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+/**
+ * Parses the raw text content of a Java-style .properties file into a
+ * key-value record.
  *
- * @returns Resolves when the action is complete.
+ * Supported syntax:
+ *  - `key=value` and `key: value` assignment forms
+ *  - `#` and `!` line comments
+ *  - Backslash (`\`) line-continuation
+ *  - Leading whitespace stripped from keys and values
+ *
+ * @param content Raw UTF-8 text of the .properties file.
+ * @returns A plain object mapping every parsed key to its value.
+ */
+function parsePropertiesContent(content) {
+    const result = {};
+    const rawLines = content.split(/\r?\n/);
+    let i = 0;
+    while (i < rawLines.length) {
+        // Strip leading whitespace before checking for comments / emptiness.
+        let line = rawLines[i].trimStart();
+        i++;
+        // Skip blank lines and comment lines.
+        if (line === '' || line.startsWith('#') || line.startsWith('!'))
+            continue;
+        // Accumulate continuation lines (trailing backslash).
+        while (line.endsWith('\\') && i < rawLines.length) {
+            line = line.slice(0, -1) + rawLines[i].trimStart();
+            i++;
+        }
+        // Match   key = value   or   key: value   (separator may be surrounded by spaces).
+        const match = line.match(/^([^=:\s][^=:]*?)\s*[=:]\s*(.*)$/);
+        if (!match)
+            continue;
+        result[match[1].trim()] = match[2].trim();
+    }
+    return result;
+}
+/**
+ * Reads and parses a .properties file from disk.
+ *
+ * @param filePath Path to the .properties file.
+ * @returns Parsed key-value record.
+ * @throws If the file cannot be read.
+ */
+function parsePropertiesFile(filePath) {
+    const content = readFileSync(filePath, 'utf-8');
+    return parsePropertiesContent(content);
+}
+// ---------------------------------------------------------------------------
+// Output-name helpers
+// ---------------------------------------------------------------------------
+/**
+ * Extracts the stem (filename without extension) from a path.
+ *
+ * @example getFileStem('/path/to/config.properties') // → 'config'
+ * @example getFileStem('app')                        // → 'app'
+ */
+function getFileStem(filePath) {
+    const base = path.basename(filePath);
+    const dotIndex = base.lastIndexOf('.');
+    return dotIndex > 0 ? base.slice(0, dotIndex) : base;
+}
+/**
+ * Assigns a unique output-group name to each file path.
+ *
+ * The first file with a given stem keeps the plain stem; subsequent files
+ * with the same stem receive a 1-based numeric suffix.
+ *
+ * @example
+ *   assignOutputNames(['a/config.properties', 'b/config.properties', 'app.properties'])
+ *   // → ['config', 'config1', 'app']
+ *
+ * @param filePaths Ordered list of file paths.
+ * @returns Parallel array of unique output-group names.
+ */
+function assignOutputNames(filePaths) {
+    const stemCount = new Map();
+    const names = [];
+    for (const filePath of filePaths) {
+        const stem = getFileStem(filePath);
+        const count = stemCount.get(stem) ?? 0;
+        stemCount.set(stem, count + 1);
+        // First occurrence → plain stem; second → stem1; third → stem2; etc.
+        names.push(count === 0 ? stem : `${stem}${count}`);
+    }
+    return names;
+}
+// ---------------------------------------------------------------------------
+// Filtering
+// ---------------------------------------------------------------------------
+/**
+ * Returns only the requested subset of a properties record.
+ *
+ * When `keys` is `undefined` or empty the full record is returned unchanged
+ * (this implements the `all` default behaviour).
+ *
+ * @param properties The parsed properties record.
+ * @param keys       Keys to keep; `undefined` means keep all.
+ * @returns Filtered key-value record.
+ */
+function filterProperties(properties, keys) {
+    if (!keys || keys.length === 0)
+        return { ...properties };
+    return Object.fromEntries(keys
+        .filter((k) => Object.prototype.hasOwnProperty.call(properties, k))
+        .map((k) => [k, properties[k]]));
+}
+
+/**
+ * © 2026-present Action Commons (https://github.com/ActionCommons)
+ */
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+/**
+ * Resolves the property filter from the `properties` input.
+ *
+ *  - Empty / omitted → `undefined` (read all properties, the default)
+ *  - One or more newline-delimited keys → array of keys to include
+ *
+ * @param properties Raw value of the `properties` input.
+ * @returns An array of keys to include, or `undefined` for "all".
+ */
+function resolveFilter(properties) {
+    const lines = properties
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+    return lines.length > 0 ? lines : undefined;
+}
+/**
+ * Parses a newline-delimited multiline input into an array of non-empty paths.
+ *
+ * @param input Raw value from `core.getInput`.
+ * @returns Trimmed, non-empty path strings.
+ */
+function splitPaths(input) {
+    return input
+        .split('\n')
+        .map((p) => p.trim())
+        .filter(Boolean);
+}
+// ---------------------------------------------------------------------------
+// Action entry-point
+// ---------------------------------------------------------------------------
+/**
+ * Main action logic.
+ *
+ * Reads one or more .properties files and exposes each property as a step
+ * output keyed by `<outputName>.<propertyKey>`, where `outputName` is derived
+ * from the file's stem (deduplicated with a numeric suffix when two files
+ * share the same stem).
+ *
+ * Input schema
+ * ────────────
+ * files                Newline-separated list of one or more .properties file paths
+ * properties           Newline-separated list of property keys to read (default: all)
+ *
+ * Output schema
+ * ─────────────
+ * <stem>.<key>  e.g. config.host, config.port
+ *
+ * When two files share the same stem the second receives a "1" suffix, the
+ * third "2", and so on:
+ *   config.host   ← first  config.properties
+ *   config1.host  ← second config.properties
+ *
+ * @returns Resolves when all outputs have been set.
  */
 async function run() {
     try {
-        const ms = getInput('milliseconds');
-        // Debug logs are only output if the `ACTIONS_STEP_DEBUG` secret is true
-        debug(`Waiting ${ms} milliseconds ...`);
-        // Log the current timestamp, wait, then log the new timestamp
-        debug(new Date().toTimeString());
-        await wait(parseInt(ms, 10));
-        debug(new Date().toTimeString());
-        // Set outputs for other workflow steps to use
-        setOutput('time', new Date().toTimeString());
+        const filesInput = getInput('files');
+        if (!filesInput.trim()) {
+            setFailed('The "files" input must be provided.');
+            return;
+        }
+        const filePaths = splitPaths(filesInput);
+        const propertyFilter = resolveFilter(getInput('properties'));
+        const outputNames = assignOutputNames(filePaths);
+        for (let i = 0; i < filePaths.length; i++) {
+            const filePath = filePaths[i];
+            const outputName = outputNames[i];
+            debug(`Processing "${filePath}" → output group "${outputName}"`);
+            const allProps = parsePropertiesFile(filePath);
+            const props = filterProperties(allProps, propertyFilter);
+            const totalCount = Object.keys(allProps).length;
+            const totalLabel = totalCount === 1 ? 'property' : 'properties';
+            info(`"${outputName}": setting ${Object.keys(props).length} output(s) ` +
+                `(${totalCount} ${totalLabel} total)`);
+            for (const [key, value] of Object.entries(props)) {
+                const outputKey = `${outputName}.${key}`;
+                debug(`  ${outputKey}=${value}`);
+                setOutput(outputKey, value);
+            }
+        }
     }
     catch (error) {
-        // Fail the workflow run if an error occurs
         if (error instanceof Error)
             setFailed(error.message);
     }
 }
 
 /**
+ * © 2026-present Action Commons (https://github.com/ActionCommons)
+ *
  * The entrypoint for the action. This file simply imports and runs the action's
  * main logic.
  */

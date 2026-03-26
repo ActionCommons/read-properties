@@ -1,62 +1,241 @@
 /**
- * Unit tests for the action's main functionality, src/main.ts
+ * © 2026-present Action Commons (https://github.com/ActionCommons)
  *
- * To mock dependencies in ESM, you can create fixtures that export mock
- * functions and objects. For example, the core module is mocked in this test,
- * so that the actual '@actions/core' module is not imported.
+ * Unit tests for src/main.ts
+ *
+ * @actions/core is mocked via __fixtures__/core.ts so no real outputs are set.
+ * src/properties.ts is mocked via __fixtures__/properties.ts so no real files
+ * are read from disk.
  */
+
 import { jest } from '@jest/globals'
 import * as core from '../__fixtures__/core.js'
-import { wait } from '../__fixtures__/wait.js'
+import * as propertiesMock from '../__fixtures__/properties.js'
 
-// Mocks should be declared before the module being tested is imported.
+// ── Module mocks (must be declared before the module under test is imported) ──
 jest.unstable_mockModule('@actions/core', () => core)
-jest.unstable_mockModule('../src/wait.js', () => ({ wait }))
+jest.unstable_mockModule('../src/properties.js', () => propertiesMock)
 
-// The module being tested should be imported dynamically. This ensures that the
-// mocks are used in place of any actual dependencies.
+// Dynamic import ensures mocks are in place before the module executes.
 const { run } = await import('../src/main.js')
 
-describe('main.ts', () => {
-  beforeEach(() => {
-    // Set the action's inputs as return values from core.getInput().
-    core.getInput.mockImplementation(() => '500')
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-    // Mock the wait function so that it does not actually wait.
-    wait.mockImplementation(() => Promise.resolve('done!'))
-  })
+/** Configures core.getInput to return different values by input name. */
+function mockInputs(inputs: Record<string, string>): void {
+  core.getInput.mockImplementation((name: string) => inputs[name] ?? '')
+}
 
+/** Collects all calls to core.setOutput as a plain object. */
+function capturedOutputs(): Record<string, string> {
+  return Object.fromEntries(
+    (core.setOutput.mock.calls as [string, string][]).map(([k, v]) => [k, v])
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('run()', () => {
   afterEach(() => {
     jest.resetAllMocks()
   })
 
-  it('Sets the time output', async () => {
-    await run()
+  // ── Validation ────────────────────────────────────────────────────────────
+  describe('input validation', () => {
+    it('fails when files is not provided', async () => {
+      mockInputs({})
+      await run()
+      expect(core.setFailed).toHaveBeenCalledWith(
+        expect.stringContaining('"files"')
+      )
+      expect(core.setOutput).not.toHaveBeenCalled()
+    })
 
-    // Verify the time output was set.
-    expect(core.setOutput).toHaveBeenNthCalledWith(
-      1,
-      'time',
-      // Simple regex to match a time string in the format HH:MM:SS.
-      expect.stringMatching(/^\d{2}:\d{2}:\d{2}/)
-    )
+    it('fails when files is blank whitespace', async () => {
+      mockInputs({ files: '   ' })
+      await run()
+      expect(core.setFailed).toHaveBeenCalledWith(
+        expect.stringContaining('"files"')
+      )
+      expect(core.setOutput).not.toHaveBeenCalled()
+    })
   })
 
-  it('Sets a failed status', async () => {
-    // Clear the getInput mock and return an invalid value.
-    core.getInput.mockClear().mockReturnValueOnce('this is not a number')
+  // ── All properties (no filter) ────────────────────────────────────────────
+  describe('reading all properties', () => {
+    it('reads all properties from a single file', async () => {
+      mockInputs({ files: 'config.properties' })
+      propertiesMock.parsePropertiesFile.mockReturnValue({
+        'db.host': 'localhost',
+        'db.port': '5432'
+      })
 
-    // Clear the wait mock and return a rejected promise.
-    wait
-      .mockClear()
-      .mockRejectedValueOnce(new Error('milliseconds is not a number'))
+      await run()
 
-    await run()
+      expect(propertiesMock.parsePropertiesFile).toHaveBeenCalledWith(
+        'config.properties'
+      )
+      expect(capturedOutputs()).toEqual({
+        'config.db.host': 'localhost',
+        'config.db.port': '5432'
+      })
+    })
 
-    // Verify that the action was marked as failed.
-    expect(core.setFailed).toHaveBeenNthCalledWith(
-      1,
-      'milliseconds is not a number'
-    )
+    it('reads all properties from multiple files', async () => {
+      mockInputs({ files: 'config.properties\napp.properties' })
+      propertiesMock.parsePropertiesFile
+        .mockReturnValueOnce({ 'db.host': 'localhost' })
+        .mockReturnValueOnce({ version: '1.0.0' })
+
+      await run()
+
+      expect(capturedOutputs()).toEqual({
+        'config.db.host': 'localhost',
+        'app.version': '1.0.0'
+      })
+    })
+
+    it('ignores blank lines in the files input', async () => {
+      mockInputs({ files: '\n  \na.properties\n\nb.properties\n' })
+      propertiesMock.parsePropertiesFile
+        .mockReturnValueOnce({ x: '1' })
+        .mockReturnValueOnce({ x: '2' })
+
+      await run()
+
+      expect(propertiesMock.parsePropertiesFile).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  // ── Property filter ───────────────────────────────────────────────────────
+  describe('properties filter', () => {
+    it('reads only the listed properties from a single file', async () => {
+      mockInputs({
+        files: 'config.properties',
+        properties: 'db.host\ndb.port'
+      })
+      propertiesMock.parsePropertiesFile.mockReturnValue({
+        'db.host': 'localhost',
+        'db.port': '5432',
+        'app.name': 'X'
+      })
+
+      await run()
+
+      const out = capturedOutputs()
+      expect(out).toEqual({
+        'config.db.host': 'localhost',
+        'config.db.port': '5432'
+      })
+      expect(out['config.app.name']).toBeUndefined()
+    })
+
+    it('applies the same filter to every file', async () => {
+      mockInputs({
+        files: 'a.properties\nb.properties',
+        properties: 'host\nport'
+      })
+      propertiesMock.parsePropertiesFile
+        .mockReturnValueOnce({ host: 'alpha', port: '80', extra: 'x' })
+        .mockReturnValueOnce({ host: 'beta', port: '81', extra: 'y' })
+
+      await run()
+
+      const out = capturedOutputs()
+      expect(out['a.host']).toBe('alpha')
+      expect(out['a.port']).toBe('80')
+      expect(out['a.extra']).toBeUndefined()
+      expect(out['b.host']).toBe('beta')
+      expect(out['b.port']).toBe('81')
+      expect(out['b.extra']).toBeUndefined()
+    })
+
+    it('sets no outputs (but does not fail) when the property key does not exist', async () => {
+      mockInputs({ files: 'config.properties', properties: 'missing' })
+      propertiesMock.parsePropertiesFile.mockReturnValue({
+        'db.host': 'localhost'
+      })
+
+      await run()
+
+      expect(core.setFailed).not.toHaveBeenCalled()
+      expect(core.setOutput).not.toHaveBeenCalled()
+    })
+
+    it('ignores blank lines in the properties input', async () => {
+      mockInputs({
+        files: 'config.properties',
+        properties: '\n  \ndb.host\n\ndb.port\n'
+      })
+      propertiesMock.parsePropertiesFile.mockReturnValue({
+        'db.host': 'localhost',
+        'db.port': '5432',
+        'app.name': 'X'
+      })
+
+      await run()
+
+      expect(capturedOutputs()).toEqual({
+        'config.db.host': 'localhost',
+        'config.db.port': '5432'
+      })
+    })
+  })
+
+  // ── Stem deduplication ────────────────────────────────────────────────────
+  describe('stem deduplication', () => {
+    it('deduplicates output group names when files share the same stem', async () => {
+      mockInputs({
+        files: [
+          'path/a/config.properties',
+          'path/b/config.properties',
+          'app.properties'
+        ].join('\n')
+      })
+      propertiesMock.parsePropertiesFile
+        .mockReturnValueOnce({ host: 'a-host' })
+        .mockReturnValueOnce({ host: 'b-host' })
+        .mockReturnValueOnce({ name: 'myapp' })
+
+      await run()
+
+      expect(capturedOutputs()).toEqual({
+        'config.host': 'a-host',
+        'config1.host': 'b-host',
+        'app.name': 'myapp'
+      })
+    })
+  })
+
+  // ── Error handling ────────────────────────────────────────────────────────
+  describe('error handling', () => {
+    it('calls core.setFailed when parsePropertiesFile throws', async () => {
+      mockInputs({ files: 'missing.properties' })
+      propertiesMock.parsePropertiesFile.mockImplementation(() => {
+        throw new Error('ENOENT: no such file or directory')
+      })
+
+      await run()
+
+      expect(core.setFailed).toHaveBeenCalledWith(
+        'ENOENT: no such file or directory'
+      )
+    })
+
+    it('does not call core.setFailed when a non-Error value is thrown', async () => {
+      // Covers the `if (error instanceof Error)` false-branch in the catch block.
+      mockInputs({ files: 'config.properties' })
+      propertiesMock.parsePropertiesFile.mockImplementation(() => {
+        throw 'unexpected non-Error rejection'
+      })
+
+      await run()
+
+      expect(core.setFailed).not.toHaveBeenCalled()
+    })
   })
 })
