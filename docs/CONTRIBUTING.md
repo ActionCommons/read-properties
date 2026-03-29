@@ -23,10 +23,10 @@ npm install
 
 ```text
 src/
-  index.ts          Entrypoint — imports and calls run()
-  main.ts           Action logic — reads inputs, calls properties helpers,
+  index.ts          Entrypoint - imports and calls run()
+  main.ts           Action logic - reads inputs, calls properties helpers,
                     sets outputs
-  properties.ts     Pure parser — parsePropertiesContent, parsePropertiesFile,
+  properties.ts     Pure parser - parsePropertiesContent, parsePropertiesFile,
                     getFileStem, assignOutputNames, filterProperties
 __tests__/
   main.test.ts      Integration-style tests for run() with mocked I/O
@@ -36,7 +36,7 @@ __fixtures__/
   properties.ts     Jest mock for src/properties.ts (stubs parsePropertiesFile)
   config.properties           Standard fixture used by parsePropertiesFile tests
   edge-cases.properties       Fixture targeting tricky parser paths
-dist/               Compiled output — committed to the repository (see Releasing)
+dist/               Compiled output - committed to the repository (see Releasing)
 action.yml          Action metadata: inputs, outputs, branding, runtime
 ```
 
@@ -156,11 +156,11 @@ using [Rollup](https://rollupjs.org/):
 npm run package
 ```
 
-Two warnings from `@actions/core` are expected and harmless — they originate
+Two warnings from `@actions/core` are expected and harmless - they originate
 inside the package itself and are not a sign of a problem in this codebase:
 
-- `"this" has been rewritten to "undefined"` — a CommonJS/ESM interop quirk.
-- `Circular dependency` — a known cycle inside `@actions/core`.
+- `"this" has been rewritten to "undefined"` - a CommonJS/ESM interop quirk.
+- `Circular dependency` - a known cycle inside `@actions/core`.
 
 To suppress them in output, add an `onwarn` handler to `rollup.config.ts`:
 
@@ -173,7 +173,7 @@ onwarn(warning, warn) {
 ```
 
 > [!IMPORTANT] `dist/index.js` must be committed to the repository. GitHub
-> Actions fetches it directly at runtime — it does not run `npm install` or
+> Actions fetches it directly at runtime - it does not run `npm install` or
 > `npm run build`.
 
 ## Releasing

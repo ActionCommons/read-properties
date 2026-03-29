@@ -94,7 +94,7 @@ describe('parsePropertiesContent', () => {
   })
 
   it('skips lines that have no valid separator (no = or :)', () => {
-    // Covers the `if (!match) continue` branch — a non-comment, non-blank line
+    // Covers the `if (!match) continue` branch - a non-comment, non-blank line
     // that doesn't contain a key=value or key:value pattern is silently ignored.
     const result = parsePropertiesContent(
       'validKey=validValue\njustakeynovalue\nanotherValid=yes'

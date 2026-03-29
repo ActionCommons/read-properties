@@ -187,17 +187,17 @@ jobs:
         run: |
           # Colon separator
           if [ "${{ steps.read-edge.outputs['edge-cases.server'] }}" != "example.com" ]; then
-            echo "FAIL: colon separator — edge-cases.server expected 'example.com'"
+            echo "FAIL: colon separator - edge-cases.server expected 'example.com'"
             exit 1
           fi
           # Continuation line
           if [ "${{ steps.read-edge.outputs['edge-cases.long.value'] }}" != "first part second part third part" ]; then
-            echo "FAIL: continuation — edge-cases.long.value expected 'first part second part third part'"
+            echo "FAIL: continuation - edge-cases.long.value expected 'first part second part third part'"
             exit 1
           fi
           # Value containing equals sign
           if [ "${{ steps.read-edge.outputs['edge-cases.connection.string'] }}" != "host=localhost;port=5432" ]; then
-            echo "FAIL: equals in value — edge-cases.connection.string expected 'host=localhost;port=5432'"
+            echo "FAIL: equals in value - edge-cases.connection.string expected 'host=localhost;port=5432'"
             exit 1
           fi
           echo "PASS: edge-case syntax"

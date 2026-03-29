@@ -1,12 +1,12 @@
 #
 # © 2026-present Action Commons (https://github.com/ActionCommons)
 #
-name: Read Properties Action
+name: Read Properties by Action Commons
 description: >
   Reads one or more .properties files and exposes every key-value pair as a step
   output in the form <filename>.<key>.
 author: Action Commons (https://github.com/ActionCommons)
-# https://feathericons.com — pick an icon that fits your action.
+# https://feathericons.com - pick an icon that fits your action.
 branding:
   icon: file-text
   color: blue
@@ -49,4 +49,4 @@ inputs:
 
 runs:
   using: node24
-  main: dist/index.js
+  main: dist/index.cjs
